@@ -1,0 +1,65 @@
+name: Upload PixelDrain file to GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g., v1.2.3)"
+        required: true
+      pixeldrain_url:
+        description: "PixelDrain URL (e.g., https://pixeldrain.com/u/khPPvLFZ)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Extract PixelDrain file ID from URL
+        id: pd
+        shell: bash
+        run: |
+          URL="${{ inputs.pixeldrain_url }}"
+          # Works for /u/<id> and also plain IDs
+          ID="$(echo "$URL" | sed -E 's#^https?://pixeldrain\.com/u/##; s#[/?].*$##')"
+          if [ -z "$ID" ]; then
+            echo "Could not extract PixelDrain ID from: $URL" >&2
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Get filename from PixelDrain
+        id: info
+        run: |
+          ID="${{ steps.pd.outputs.id }}"
+          INFO="$(curl -fsSL "https://pixeldrain.com/api/file/${ID}/info")"
+          NAME="$(echo "$INFO" | jq -r '.name')"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download from PixelDrain
+        run: |
+          ID="${{ steps.pd.outputs.id }}"
+          NAME="${{ steps.info.outputs.name }}"
+          curl -fL --retry 3 --retry-delay 2 \
+            "https://pixeldrain.com/api/file/${ID}?download" \
+            -o "$NAME"
+
+      - name: Create release (if missing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
+
+      - name: Upload asset to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          NAME="${{ steps.info.outputs.name }}"
+          gh release upload "$TAG" "$NAME" --clobber

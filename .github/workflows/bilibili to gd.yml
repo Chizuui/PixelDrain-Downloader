@@ -1,0 +1,71 @@
+name: Mirror biligame apk -> Google Drive
+
+on:
+  workflow_dispatch:
+  # opsional: jalan otomatis tiap hari
+  # schedule:
+  #   - cron: "0 2 * * *"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 jq
+
+      - name: Write Service Account JSON
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+        run: |
+          echo "$GDRIVE_SA_JSON" > sa.json
+          test -s sa.json
+
+      - name: Download APK
+        run: |
+          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
+          OUT="mrfz_2.6.91_20251219_100755_ab244.apk"
+
+          # aria2 lebih tahan putus & bisa multi-connection
+          aria2c \
+            --max-connection-per-server=8 \
+            --split=8 \
+            --min-split-size=1M \
+            --retry-wait=5 \
+            --max-tries=10 \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --user-agent="Mozilla/5.0" \
+            -o "$OUT" "$URL"
+
+          ls -lh "$OUT"
+
+      - name: Setup rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          cat > rclone.conf <<'EOF'
+          [gdrive]
+          type = drive
+          scope = drive
+          service_account_file = sa.json
+          EOF
+
+      - name: Upload to Google Drive folder
+        env:
+          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
+
+          # Upload langsung ke folder ID
+          rclone --config rclone.conf copy "$FILE" "gdrive:{"$FOLDER_ID"}" \
+            --drive-chunk-size 64M \
+            --transfers 1 \
+            --checkers 4 \
+            -P
+
+      - name: Done
+        run: echo "Upload selesai."

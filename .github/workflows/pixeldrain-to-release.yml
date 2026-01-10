@@ -1,4 +1,4 @@
-name: Mirror biligame apk -> Google Drive + PixelDrain
+name: Mirror biligame apk -> PixelDrain
 
 on:
   workflow_dispatch:
@@ -44,26 +44,6 @@ jobs:
             -o "$FILE" "$URL"
 
           ls -lh "$FILE"
-
-      # ====== GOOGLE DRIVE ======
-      - name: Setup rclone (OAuth)
-        env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          echo "$RCLONE_CONF" > rclone.conf
-
-      - name: Upload to Google Drive
-        env:
-          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
-
-          rclone --config rclone.conf copy "$FILE" "gdrive:{${FOLDER_ID}}" \
-            --drive-chunk-size 64M \
-            --transfers 1 \
-            --checkers 4 \
-            -P
 
       # ====== PIXELDRAIN ======
       - name: Upload to PixelDrain

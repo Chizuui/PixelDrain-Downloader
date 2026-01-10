@@ -1,76 +1,85 @@
-name: Upload PixelDrain file to GitHub Release
+name: Mirror biligame apk -> Google Drive + PixelDrain
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (e.g., v1.2.3)"
-        required: true
-      pixeldrain_url:
-        description: "PixelDrain URL (e.g., https://pixeldrain.com/u/khPPvLFZ)"
-        required: true
-
-permissions:
-  contents: write
 
 jobs:
-  upload:
+  mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Extract PixelDrain file ID from URL
-        id: pd
-        shell: bash
         run: |
-          URL="${{ inputs.pixeldrain_url }}"
-          ID="$(echo "$URL" | sed -E 's#^https?://pixeldrain\.com/u/##; s#[/?].*$##')"
-          if [ -z "$ID" ]; then
-            echo "Could not extract PixelDrain ID from: $URL" >&2
-            exit 1
-          fi
-          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y aria2 curl
 
-      - name: Get filename from PixelDrain
-        id: info
+      # ====== DIAGNOSTIC ======
+      - name: Check URL headers (diagnostic)
         run: |
-          ID="${{ steps.pd.outputs.id }}"
-          INFO="$(curl -fsSL "https://pixeldrain.com/api/file/${ID}/info")"
-          NAME="$(echo "$INFO" | jq -r '.name')"
-          if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then
-            echo "Could not get filename from PixelDrain info response" >&2
-            echo "$INFO"
-            exit 1
-          fi
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
+          curl -I -L "$URL" \
+            -A "Mozilla/5.0 (Linux; Android 10)" \
+            -e "https://www.biligame.com/" \
+            || true
 
-      - name: Download from PixelDrain
+      # ====== DOWNLOAD ======
+      - name: Download APK (polite aria2)
         run: |
-          ID="${{ steps.pd.outputs.id }}"
-          NAME="${{ steps.info.outputs.name }}"
-          curl -fL --retry 3 --retry-delay 2 \
-            "https://pixeldrain.com/api/file/${ID}?download" \
-            -o "$NAME"
-          ls -lah
+          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
+          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
 
-      - name: Create release (if missing)
+          aria2c \
+            --max-connection-per-server=1 \
+            --split=1 \
+            -j 1 \
+            --retry-wait=5 \
+            --max-tries=10 \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --user-agent="Mozilla/5.0 (Linux; Android 10)" \
+            --header="Referer: https://www.biligame.com/" \
+            --header="Origin: https://www.biligame.com" \
+            -o "$FILE" "$URL"
+
+          ls -lh "$FILE"
+
+      # ====== GOOGLE DRIVE ======
+      - name: Setup rclone (OAuth)
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
         run: |
-          TAG="${{ inputs.tag }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          echo "$RCLONE_CONF" > rclone.conf
 
-      - name: Upload asset to release
+      - name: Upload to Google Drive
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
-          TAG="${{ inputs.tag }}"
-          NAME="${{ steps.info.outputs.name }}"
-          gh release upload "$TAG" "$NAME" --clobber
+          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
 
+          rclone --config rclone.conf copy "$FILE" "gdrive:{${FOLDER_ID}}" \
+            --drive-chunk-size 64M \
+            --transfers 1 \
+            --checkers 4 \
+            -P
+
+      # ====== PIXELDRAIN ======
+      - name: Upload to PixelDrain
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
+
+          echo "Uploading to PixelDrain..."
+          RESPONSE=$(curl -s \
+            -u :$PIXELDRAIN_API_KEY \
+            -T "$FILE" \
+            https://pixeldrain.com/api/file/)
+
+          echo "PixelDrain response:"
+          echo "$RESPONSE"
+
+      - name: Done
+        run: echo "Mirror selesai (Google Drive + PixelDrain)"

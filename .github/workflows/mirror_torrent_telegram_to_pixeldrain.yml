@@ -1,0 +1,75 @@
+name: Mirror (Torrent/Magnet/Telegram) -> PixelDrain (universal URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Pilih sumber: url | magnet | torrent_url | telegram_file_id"
+        required: true
+        default: "magnet"
+      input:
+        description: "Isi sesuai source: (direct URL) / (magnet link) / (URL .torrent) / (telegram file_id)"
+        required: true
+        default: ""
+      filename:
+        description: "Optional: custom filename (kosongkan untuk auto)"
+        required: false
+        default: ""
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 curl jq python3
+
+      - name: Prepare variables
+        id: vars
+        shell: bash
+        run: |
+          SRC="${{ inputs.source }}"
+          INP="${{ inputs.input }}"
+          CUSTOM_NAME="${{ inputs.filename }}"
+
+          # default name
+          AUTO_NAME="download.bin"
+
+          # auto name based on mode
+          if [ "$SRC" = "url" ]; then
+            AUTO_NAME="$(basename "${INP%%\?*}")"
+          elif [ "$SRC" = "torrent_url" ]; then
+            # output file name will come from torrent metadata,
+            # but we still set a fallback name
+            AUTO_NAME="torrent_download"
+          elif [ "$SRC" = "magnet" ]; then
+            AUTO_NAME="magnet_download"
+          elif [ "$SRC" = "telegram_file_id" ]; then
+            AUTO_NAME="telegram_download.bin"
+          fi
+
+          if [ -z "$AUTO_NAME" ] || [ "$AUTO_NAME" = "/" ]; then
+            AUTO_NAME="download.bin"
+          fi
+
+          if [ -n "$CUSTOM_NAME" ]; then
+            FILE="$CUSTOM_NAME"
+          else
+            FILE="$AUTO_NAME"
+          fi
+
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+          echo "inp=$INP" >> "$GITHUB_OUTPUT"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+          echo "SOURCE: $SRC"
+          echo "INPUT : $INP"
+          echo "FILE  : $FILE"
+
+      # ====== DOWNLOAD: Direct URL ======
+      - name: Download direct URL (aria2)
+        if: steps.vars.outputs.

@@ -1,4 +1,4 @@
-name: Mirror (Telegram/Torrent/Magnet/URL) -> PixelDrain
+name: Mirror (URL/Magnet/Torrent/Telegram) -> PixelDrain
 
 on:
   workflow_dispatch:
@@ -35,6 +35,7 @@ jobs:
           AUTO="download.bin"
           if [ "$SRC" = "url" ]; then
             AUTO="$(basename "${INP%%\?*}")"
+            [ -z "$AUTO" ] && AUTO="download.bin"
           elif [ "$SRC" = "magnet" ]; then
             AUTO="magnet_download"
           elif [ "$SRC" = "torrent_url" ]; then
@@ -45,35 +46,67 @@ jobs:
 
           FILE="${CUSTOM:-$AUTO}"
 
-          echo "src=$SRC" >> $GITHUB_OUTPUT
-          echo "inp=$INP" >> $GITHUB_OUTPUT
-          echo "file=$FILE" >> $GITHUB_OUTPUT
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+          echo "inp=$INP" >> "$GITHUB_OUTPUT"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
-      # ===== DIRECT URL =====
+          echo "SOURCE=$SRC"
+          echo "INPUT=$INP"
+          echo "FILE=$FILE"
+
+      # ===== URL =====
       - name: Download direct URL
         if: steps.vars.outputs.src == 'url'
+        shell: bash
         run: |
-          aria2c -o "${{ steps.vars.outputs.file }}" "${{ steps.vars.outputs.inp }}"
-          ls -lh "${{ steps.vars.outputs.file }}"
+          URL="${{ steps.vars.outputs.inp }}"
+          FILE="${{ steps.vars.outputs.file }}"
+
+          aria2c \
+            --max-connection-per-server=1 \
+            --split=1 -j 1 \
+            --retry-wait=5 --max-tries=10 \
+            --timeout=60 --connect-timeout=30 \
+            -o "$FILE" "$URL"
+
+          ls -lh "$FILE"
 
       # ===== MAGNET =====
       - name: Download magnet
         if: steps.vars.outputs.src == 'magnet'
+        shell: bash
         run: |
+          MAGNET="${{ steps.vars.outputs.inp }}"
           mkdir -p out
-          aria2c --seed-time=0 --follow-torrent=mem --bt-stop-timeout=60 -d out "${{ steps.vars.outputs.inp }}"
+
+          aria2c \
+            --seed-time=0 \
+            --follow-torrent=mem \
+            --bt-stop-timeout=60 \
+            --enable-dht=true \
+            --enable-peer-exchange=true \
+            --bt-enable-lpd=true \
+            -d out \
+            "$MAGNET"
+
+          echo "Downloaded (out):"
           ls -lah out
 
       # ===== TORRENT URL =====
       - name: Download torrent file URL
         if: steps.vars.outputs.src == 'torrent_url'
+        shell: bash
         run: |
+          TORRENT_URL="${{ steps.vars.outputs.inp }}"
           mkdir -p out
-          curl -L --fail -o file.torrent "${{ steps.vars.outputs.inp }}"
+
+          curl -L --fail -o file.torrent "$TORRENT_URL"
           aria2c --seed-time=0 -d out file.torrent
+
+          echo "Downloaded (out):"
           ls -lah out
 
-      # ===== TELEGRAM (gabungan: file_id atau link t.me -> ambil media terbaru dari getUpdates) =====
+      # ===== TELEGRAM (file_id OR t.me link -> latest media in getUpdates) =====
       - name: Download from Telegram (file_id OR t.me link)
         if: steps.vars.outputs.src == 'telegram'
         env:
@@ -99,10 +132,6 @@ jobs:
               return json.loads(r.read().decode("utf-8"))
 
           def pick_file_id_from_update(obj: dict):
-            """
-            Prioritas: document/video/audio; fallback: photo (ambil ukuran terbesar)
-            """
-            # message or channel_post
             msg = obj.get("message") or obj.get("channel_post") or {}
             if "document" in msg and "file_id" in msg["document"]:
               return ("document", msg["document"]["file_id"])
@@ -111,35 +140,32 @@ jobs:
             if "audio" in msg and "file_id" in msg["audio"]:
               return ("audio", msg["audio"]["file_id"])
             if "photo" in msg and isinstance(msg["photo"], list) and msg["photo"]:
-              # ambil yang terakhir (biasanya terbesar)
               ph = msg["photo"][-1]
               if "file_id" in ph:
                 return ("photo", ph["file_id"])
             return (None, None)
 
-          # Case 1: input sudah berupa file_id (bukan URL t.me)
           is_tme = bool(re.match(r"^https?://t\.me/|^t\.me/", inp))
           is_file_id_like = (not is_tme) and (len(inp) >= 20) and ("/" not in inp) and (" " not in inp)
 
           file_id = None
+          mode = None
 
           if is_file_id_like:
             file_id = inp
             mode = "direct_file_id"
           else:
-            # Case 2: input adalah t.me link (atau bukan file_id)
-            # -> Bot API tidak bisa fetch message dari link t.me
-            # -> solusi: user FORWARD pesan/file itu ke bot, lalu kita ambil media TERBARU dari getUpdates
             mode = "latest_update_media"
-
             updates = api_get(f"https://api.telegram.org/bot{token}/getUpdates")
             if not updates.get("ok"):
               print("getUpdates failed:", updates)
               sys.exit(1)
 
             results = updates.get("result", [])
-            # cari update paling terakhir yang punya media
             results_sorted = sorted(results, key=lambda x: x.get("update_id", 0), reverse=True)
+
+            picked_kind = None
+            picked_update_id = None
 
             for u in results_sorted:
               kind, fid = pick_file_id_from_update(u)
@@ -151,14 +177,12 @@ jobs:
 
             if not file_id:
               print("Tidak menemukan media terbaru di getUpdates.")
-              print("Kalau input kamu link t.me, FORWARD dulu pesan/file itu ke bot, lalu jalankan workflow lagi.")
+              print("Jika input kamu link t.me, FORWARD dulu pesan/file itu ke bot, lalu jalankan workflow lagi.")
               sys.exit(1)
 
             print(f"Picked from getUpdates: kind={picked_kind}, update_id={picked_update_id}")
 
-          # resolve file_path
-          url = f"https://api.telegram.org/bot{token}/getFile?file_id={urllib.parse.quote(file_id)}"
-          info = api_get(url)
+          info = api_get(f"https://api.telegram.org/bot{token}/getFile?file_id={urllib.parse.quote(file_id)}")
           if not info.get("ok"):
             print("getFile failed:", info)
             sys.exit(1)
@@ -174,42 +198,70 @@ jobs:
 
           ls -lh "$OUTFILE"
 
-      # ===== SELECT UPLOAD TARGET =====
+      # ===== PICK TARGET (FIX: jangan pakai steps.pick.outputs.target di step yang sama) =====
       - name: Prepare upload file
         id: pick
+        shell: bash
         run: |
-          if [ "${{ steps.vars.outputs.src }}" = "magnet" ] || [ "${{ steps.vars.outputs.src }}" = "torrent_url" ]; then
+          SRC="${{ steps.vars.outputs.src }}"
+          FILE="${{ steps.vars.outputs.file }}"
+
+          if [ "$SRC" = "magnet" ] || [ "$SRC" = "torrent_url" ]; then
+            if [ ! -d out ]; then
+              echo "Missing out/ directory (torrent download failed?)"
+              exit 1
+            fi
             zip -r torrent_payload.zip out
-            echo "target=torrent_payload.zip" >> $GITHUB_OUTPUT
+            TARGET="torrent_payload.zip"
           else
-            echo "target=${{ steps.vars.outputs.file }}" >> $GITHUB_OUTPUT
+            TARGET="$FILE"
           fi
-          ls -lh "${{ steps.pick.outputs.target }}"
+
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          ls -lh "$TARGET"
 
       # ===== PIXELDRAIN =====
       - name: Upload to PixelDrain
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        shell: bash
         run: |
-          FILE="${{ steps.pick.outputs.target }}"
+          TARGET="${{ steps.pick.outputs.target }}"
 
           if [ -z "$PIXELDRAIN_API_KEY" ]; then
             echo "Missing PIXELDRAIN_API_KEY"
             exit 1
           fi
 
-          RESP=$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$FILE" https://pixeldrain.com/api/file/)
+          echo "Uploading: $TARGET"
+          RESP="$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$TARGET" https://pixeldrain.com/api/file/)"
+
           echo "$RESP" | jq . || echo "$RESP"
 
-          ID=$(echo "$RESP" | jq -r '.id // empty')
+          ID="$(echo "$RESP" | jq -r '.id // empty')"
+          SHA256="$(echo "$RESP" | jq -r '.hash_sha256 // empty')"
+          SIZE="$(echo "$RESP" | jq -r '.size // empty')"
+
           if [ -z "$ID" ]; then
             echo "PixelDrain upload failed (missing id)"
             exit 1
           fi
 
-          echo "## PixelDrain" >> $GITHUB_STEP_SUMMARY
-          echo "- File: \`$FILE\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Link: https://pixeldrain.com/u/$ID" >> $GITHUB_STEP_SUMMARY
+          LINK="https://pixeldrain.com/u/$ID"
+          echo "PixelDrain link: $LINK"
+
+          {
+            echo "## PixelDrain Upload Result"
+            echo ""
+            echo "- **Upload:** \`$TARGET\`"
+            echo "- **Link:** $LINK"
+            if [ -n "$SIZE" ]; then
+              echo "- **Size:** $SIZE bytes"
+            fi
+            if [ -n "$SHA256" ]; then
+              echo "- **SHA256:** \`$SHA256\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done
         run: echo "Mirror selesai ✅"

@@ -1,7 +1,20 @@
-name: Mirror biligame apk -> Google Drive
+name: Mirror (Torrent/Magnet/Telegram) -> PixelDrain (universal URL)
 
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        description: "Pilih sumber: url | magnet | torrent_url | telegram_file_id"
+        required: true
+        default: "magnet"
+      input:
+        description: "Isi sesuai source: (direct URL) / (magnet link) / (URL .torrent) / (telegram file_id)"
+        required: true
+        default: ""
+      filename:
+        description: "Optional: custom filename (kosongkan untuk auto)"
+        required: false
+        default: ""
 
 jobs:
   mirror:
@@ -13,66 +26,50 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 curl
+          sudo apt-get install -y aria2 curl jq python3
 
-      - name: Write Service Account JSON
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+      - name: Prepare variables
+        id: vars
+        shell: bash
         run: |
-          echo "$GDRIVE_SA_JSON" > sa.json
-          test -s sa.json
+          SRC="${{ inputs.source }}"
+          INP="${{ inputs.input }}"
+          CUSTOM_NAME="${{ inputs.filename }}"
 
-      # Diagnostik: lihat status dari GitHub runner (berguna kalau masih 403)
-      - name: Check URL headers (diagnostic)
-        run: |
-          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
-          echo "Testing HEAD response..."
-          curl -I -L "$URL" \
-            -A "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" \
-            -e "https://www.biligame.com/" \
-            || true
+          # default name
+          AUTO_NAME="download.bin"
 
-      - name: Download APK (polite aria2 settings)
-        run: |
-          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
-          OUT="mrfz_2.6.91_20251219_100755_ab244.apk"
+          # auto name based on mode
+          if [ "$SRC" = "url" ]; then
+            AUTO_NAME="$(basename "${INP%%\?*}")"
+          elif [ "$SRC" = "torrent_url" ]; then
+            # output file name will come from torrent metadata,
+            # but we still set a fallback name
+            AUTO_NAME="torrent_download"
+          elif [ "$SRC" = "magnet" ]; then
+            AUTO_NAME="magnet_download"
+          elif [ "$SRC" = "telegram_file_id" ]; then
+            AUTO_NAME="telegram_download.bin"
+          fi
 
-          aria2c \
-            --max-connection-per-server=1 \
-            --split=1 \
-            -j 1 \
-            --retry-wait=5 \
-            --max-tries=10 \
-            --timeout=60 \
-            --connect-timeout=30 \
-            --user-agent="Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" \
-            --header="Referer: https://www.biligame.com/" \
-            --header="Origin: https://www.biligame.com" \
-            -o "$OUT" "$URL"
+          if [ -z "$AUTO_NAME" ] || [ "$AUTO_NAME" = "/" ]; then
+            AUTO_NAME="download.bin"
+          fi
 
-          ls -lh "$OUT"
+          if [ -n "$CUSTOM_NAME" ]; then
+            FILE="$CUSTOM_NAME"
+          else
+            FILE="$AUTO_NAME"
+          fi
 
-      - name: Setup rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          cat > rclone.conf <<'EOF'
-          [gdrive]
-          type = drive
-          scope = drive
-          service_account_file = sa.json
-          EOF
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+          echo "inp=$INP" >> "$GITHUB_OUTPUT"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to Google Drive folder
-        env:
-          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
+          echo "SOURCE: $SRC"
+          echo "INPUT : $INP"
+          echo "FILE  : $FILE"
 
-          rclone --config rclone.conf copy "$FILE" "gdrive:{${FOLDER_ID}}" \
-            --drive-chunk-size 64M \
-            --transfers 1 \
-            --checkers 4 \
-            -P
-
-      - name: Done
-        run: echo "Upload selesai."
+      # ====== DOWNLOAD: Direct URL ======
+      - name: Download direct URL (aria2)
+        if: steps.vars.outputs.

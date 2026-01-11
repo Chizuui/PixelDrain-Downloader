@@ -1,4 +1,4 @@
-name: Mirror (URL/Magnet/Torrent/Telegram) -> PixelDrain
+name: Mirror (URL/Magnet/Torrent/Telegram) -> PixelDrain (No Zip)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         description: "Direct URL / magnet / URL .torrent / (Telegram: file_id atau link t.me)"
         required: true
       filename:
-        description: "Optional custom filename"
+        description: "Optional custom filename (Hanya efek untuk single file/URL/Telegram)"
         required: false
         default: ""
 
@@ -22,7 +22,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 curl jq python3 zip
+          sudo apt-get install -y aria2 curl jq python3
 
       - name: Prepare variables
         id: vars
@@ -50,10 +50,6 @@ jobs:
           echo "inp=$INP" >> "$GITHUB_OUTPUT"
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
-          echo "SOURCE=$SRC"
-          echo "INPUT=$INP"
-          echo "FILE=$FILE"
-
       # ===== URL =====
       - name: Download direct URL
         if: steps.vars.outputs.src == 'url'
@@ -67,6 +63,7 @@ jobs:
             --split=1 -j 1 \
             --retry-wait=5 --max-tries=10 \
             --timeout=60 --connect-timeout=30 \
+            --user-agent="Mozilla/5.0" \
             -o "$FILE" "$URL"
 
           ls -lh "$FILE"
@@ -90,7 +87,7 @@ jobs:
             "$MAGNET"
 
           echo "Downloaded (out):"
-          ls -lah out
+          ls -R out
 
       # ===== TORRENT URL =====
       - name: Download torrent file URL
@@ -104,10 +101,10 @@ jobs:
           aria2c --seed-time=0 -d out file.torrent
 
           echo "Downloaded (out):"
-          ls -lah out
+          ls -R out
 
-      # ===== TELEGRAM (file_id OR t.me link -> latest media in getUpdates) =====
-      - name: Download from Telegram (file_id OR t.me link)
+      # ===== TELEGRAM =====
+      - name: Download from Telegram
         if: steps.vars.outputs.src == 'telegram'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -177,7 +174,6 @@ jobs:
 
             if not file_id:
               print("Tidak menemukan media terbaru di getUpdates.")
-              print("Jika input kamu link t.me, FORWARD dulu pesan/file itu ke bot, lalu jalankan workflow lagi.")
               sys.exit(1)
 
             print(f"Picked from getUpdates: kind={picked_kind}, update_id={picked_update_id}")
@@ -189,79 +185,76 @@ jobs:
 
           path = info["result"]["file_path"]
           dl = f"https://api.telegram.org/file/bot{token}/{path}"
-
-          print("Mode:", mode)
+          
           print("Downloading:", dl)
           urllib.request.urlretrieve(dl, out)
-          print("Saved:", out)
           PY
 
           ls -lh "$OUTFILE"
 
-      # ===== PICK TARGET (FIX: jangan pakai steps.pick.outputs.target di step yang sama) =====
-      - name: Prepare upload file
-        id: pick
-        shell: bash
-        run: |
-          SRC="${{ steps.vars.outputs.src }}"
-          FILE="${{ steps.vars.outputs.file }}"
-
-          if [ "$SRC" = "magnet" ] || [ "$SRC" = "torrent_url" ]; then
-            if [ ! -d out ]; then
-              echo "Missing out/ directory (torrent download failed?)"
-              exit 1
-            fi
-            zip -r torrent_payload.zip out
-            TARGET="torrent_payload.zip"
-          else
-            TARGET="$FILE"
-          fi
-
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          ls -lh "$TARGET"
-
-      # ===== PIXELDRAIN =====
+      # ===== PIXELDRAIN UPLOAD (MULTI-FILE SUPPORT) =====
       - name: Upload to PixelDrain
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         shell: bash
         run: |
-          TARGET="${{ steps.pick.outputs.target }}"
-
+          SRC="${{ steps.vars.outputs.src }}"
+          SINGLE_FILE="${{ steps.vars.outputs.file }}"
+          
           if [ -z "$PIXELDRAIN_API_KEY" ]; then
-            echo "Missing PIXELDRAIN_API_KEY"
+            echo "::error::Missing PIXELDRAIN_API_KEY"
             exit 1
           fi
 
-          echo "Uploading: $TARGET"
-          RESP="$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$TARGET" https://pixeldrain.com/api/file/)"
+          # Fungsi upload reusable
+          upload_one_file() {
+            local filepath="$1"
+            local filename="$(basename "$filepath")"
+            
+            echo "---------------------------------------------------"
+            echo "Uploading: $filename"
+            
+            # Curl upload
+            RESP="$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$filepath" -n https://pixeldrain.com/api/file/)"
+            
+            # Parse JSON
+            ID="$(echo "$RESP" | jq -r '.id // empty')"
+            SHA256="$(echo "$RESP" | jq -r '.hash_sha256 // empty')"
+            SIZE="$(echo "$RESP" | jq -r '.size // empty')"
+            
+            if [ -n "$ID" ]; then
+              LINK="https://pixeldrain.com/u/$ID"
+              echo "✅ Success: $LINK"
+              
+              # Tulis ke summary
+              echo "- **File:** \`$filename\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "  - **Link:** [$LINK]($LINK)" >> "$GITHUB_STEP_SUMMARY"
+              echo "  - **Size:** $SIZE bytes" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "❌ Failed: $RESP"
+              echo "- **File:** \`$filename\` (FAILED)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
 
-          echo "$RESP" | jq . || echo "$RESP"
+          echo "## PixelDrain Upload Result" >> "$GITHUB_STEP_SUMMARY"
 
-          ID="$(echo "$RESP" | jq -r '.id // empty')"
-          SHA256="$(echo "$RESP" | jq -r '.hash_sha256 // empty')"
-          SIZE="$(echo "$RESP" | jq -r '.size // empty')"
-
-          if [ -z "$ID" ]; then
-            echo "PixelDrain upload failed (missing id)"
-            exit 1
+          # LOGIKA PEMILIHAN (Single vs Folder Torrent)
+          if [ "$SRC" = "magnet" ] || [ "$SRC" = "torrent_url" ]; then
+             if [ ! -d out ]; then
+               echo "Directory 'out' not found. Download failed?"
+               exit 1
+             fi
+             
+             # Cari semua file dalam folder out (recursive) dan upload satu per satu
+             # Menggunakan process substitution untuk handle spasi pada nama file
+             while IFS= read -r -d '' file; do
+               upload_one_file "$file"
+             done < <(find out -type f -print0)
+             
+          else
+             # Upload single file (URL Direct / Telegram)
+             upload_one_file "$SINGLE_FILE"
           fi
-
-          LINK="https://pixeldrain.com/u/$ID"
-          echo "PixelDrain link: $LINK"
-
-          {
-            echo "## PixelDrain Upload Result"
-            echo ""
-            echo "- **Upload:** \`$TARGET\`"
-            echo "- **Link:** $LINK"
-            if [ -n "$SIZE" ]; then
-              echo "- **Size:** $SIZE bytes"
-            fi
-            if [ -n "$SHA256" ]; then
-              echo "- **SHA256:** \`$SHA256\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done
-        run: echo "Mirror selesai ✅"
+        run: echo "All operations finished."

@@ -1,7 +1,16 @@
-name: Mirror biligame apk -> PixelDrain
+name: Mirror file -> PixelDrain (universal URL)
 
 on:
   workflow_dispatch:
+    inputs:
+      url:
+        description: "Direct download URL (contoh: https://example.com/file.apk)"
+        required: true
+        default: "https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
+      filename:
+        description: "Optional: custom filename (kosongkan untuk auto dari URL)"
+        required: false
+        default: ""
 
 jobs:
   mirror:
@@ -13,22 +22,46 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 curl
+          sudo apt-get install -y aria2 curl jq
 
-      # ====== DIAGNOSTIC ======
+      - name: Set variables
+        id: vars
+        run: |
+          URL="${{ inputs.url }}"
+          CUSTOM_NAME="${{ inputs.filename }}"
+
+          # Ambil nama file dari URL (tanpa querystring)
+          AUTO_NAME="$(basename "${URL%%\?*}")"
+          if [ -z "$AUTO_NAME" ] || [ "$AUTO_NAME" = "/" ]; then
+            AUTO_NAME="download.bin"
+          fi
+
+          if [ -n "$CUSTOM_NAME" ]; then
+            FILE="$CUSTOM_NAME"
+          else
+            FILE="$AUTO_NAME"
+          fi
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+          echo "URL: $URL"
+          echo "FILE: $FILE"
+
+      # ====== DIAGNOSTIC (opsional tapi berguna) ======
       - name: Check URL headers (diagnostic)
         run: |
-          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
+          URL="${{ steps.vars.outputs.url }}"
           curl -I -L "$URL" \
             -A "Mozilla/5.0 (Linux; Android 10)" \
             -e "https://www.biligame.com/" \
             || true
 
       # ====== DOWNLOAD ======
-      - name: Download APK (polite aria2)
+      - name: Download (polite aria2)
         run: |
-          URL="https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk"
-          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
+          URL="${{ steps.vars.outputs.url }}"
+          FILE="${{ steps.vars.outputs.file }}"
 
           aria2c \
             --max-connection-per-server=1 \
@@ -45,21 +78,44 @@ jobs:
 
           ls -lh "$FILE"
 
-      # ====== PIXELDRAIN ======
-      - name: Upload to PixelDrain
+      # ====== PIXELDRAIN UPLOAD + PRINT LINK ======
+      - name: Upload to PixelDrain and print link
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
         run: |
-          FILE="mrfz_2.6.91_20251219_100755_ab244.apk"
+          FILE="${{ steps.vars.outputs.file }}"
+
+          if [ -z "$PIXELDRAIN_API_KEY" ]; then
+            echo "Missing secret PIXELDRAIN_API_KEY"
+            exit 1
+          fi
 
           echo "Uploading to PixelDrain..."
-          RESPONSE=$(curl -s \
+          RESPONSE="$(curl -sS \
             -u :$PIXELDRAIN_API_KEY \
             -T "$FILE" \
-            https://pixeldrain.com/api/file/)
+            https://pixeldrain.com/api/file/)"
+          echo "$RESPONSE" | jq .
 
-          echo "PixelDrain response:"
-          echo "$RESPONSE"
+          # Extract id dan success
+          SUCCESS="$(echo "$RESPONSE" | jq -r '.success // empty')"
+          ID="$(echo "$RESPONSE" | jq -r '.id // empty')"
+
+          if [ "$SUCCESS" != "true" ] || [ -z "$ID" ]; then
+            echo "PixelDrain upload failed."
+            exit 1
+          fi
+
+          LINK="https://pixeldrain.com/u/$ID"
+          echo "PixelDrain link: $LINK"
+
+          # Simpan ke step summary biar gampang dicopy
+          {
+            echo "## PixelDrain Upload Result"
+            echo ""
+            echo "- **File:** \`$FILE\`"
+            echo "- **Link:** $LINK"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done
-        run: echo "Mirror selesai (Google Drive + PixelDrain)"
+        run: echo "Mirror selesai (PixelDrain)"

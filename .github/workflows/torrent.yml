@@ -8,17 +8,17 @@ on:
         required: true
         default: "magnet"
       input:
-        description: "Isi sesuai source: (direct URL) / (magnet link) / (URL .torrent) / (telegram file_id)"
+        description: "Isi sesuai source"
         required: true
-        default: ""
       filename:
-        description: "Optional: custom filename (kosongkan untuk auto)"
+        description: "Optional custom filename"
         required: false
         default: ""
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 curl jq python3
+          sudo apt-get install -y aria2 curl jq python3 zip
 
       - name: Prepare variables
         id: vars
@@ -34,42 +34,117 @@ jobs:
         run: |
           SRC="${{ inputs.source }}"
           INP="${{ inputs.input }}"
-          CUSTOM_NAME="${{ inputs.filename }}"
+          CUSTOM="${{ inputs.filename }}"
 
-          # default name
-          AUTO_NAME="download.bin"
-
-          # auto name based on mode
+          AUTO="download.bin"
           if [ "$SRC" = "url" ]; then
-            AUTO_NAME="$(basename "${INP%%\?*}")"
-          elif [ "$SRC" = "torrent_url" ]; then
-            # output file name will come from torrent metadata,
-            # but we still set a fallback name
-            AUTO_NAME="torrent_download"
+            AUTO="$(basename "${INP%%\?*}")"
           elif [ "$SRC" = "magnet" ]; then
-            AUTO_NAME="magnet_download"
+            AUTO="magnet_download"
+          elif [ "$SRC" = "torrent_url" ]; then
+            AUTO="torrent_download"
           elif [ "$SRC" = "telegram_file_id" ]; then
-            AUTO_NAME="telegram_download.bin"
+            AUTO="telegram_download.bin"
           fi
 
-          if [ -z "$AUTO_NAME" ] || [ "$AUTO_NAME" = "/" ]; then
-            AUTO_NAME="download.bin"
+          FILE="${CUSTOM:-$AUTO}"
+
+          echo "src=$SRC" >> $GITHUB_OUTPUT
+          echo "inp=$INP" >> $GITHUB_OUTPUT
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+
+      # ===== DIRECT URL =====
+      - name: Download direct URL
+        if: steps.vars.outputs.src == 'url'
+        run: |
+          aria2c -o "${{ steps.vars.outputs.file }}" "${{ steps.vars.outputs.inp }}"
+
+      # ===== MAGNET =====
+      - name: Download magnet
+        if: steps.vars.outputs.src == 'magnet'
+        run: |
+          mkdir out
+          aria2c \
+            --seed-time=0 \
+            --follow-torrent=mem \
+            --bt-stop-timeout=60 \
+            --enable-dht=true \
+            --enable-peer-exchange=true \
+            --bt-enable-lpd=true \
+            -d out \
+            "${{ steps.vars.outputs.inp }}"
+
+      # ===== TORRENT URL =====
+      - name: Download torrent file
+        if: steps.vars.outputs.src == 'torrent_url'
+        run: |
+          mkdir out
+          curl -L -o file.torrent "${{ steps.vars.outputs.inp }}"
+          aria2c --seed-time=0 -d out file.torrent
+
+      # ===== TELEGRAM (file_id) =====
+      - name: Download Telegram file (file_id)
+        if: steps.vars.outputs.src == 'telegram_file_id'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FILE_ID: ${{ steps.vars.outputs.inp }}
+          OUTFILE: ${{ steps.vars.outputs.file }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Missing TELEGRAM_BOT_TOKEN"
+            exit 1
           fi
 
-          if [ -n "$CUSTOM_NAME" ]; then
-            FILE="$CUSTOM_NAME"
+          python3 << 'PY'
+          import json, urllib.request, os, sys
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          file_id = os.environ["FILE_ID"]
+          out = os.environ["OUTFILE"]
+
+          api = f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}"
+          data = json.loads(urllib.request.urlopen(api).read())
+
+          if not data.get("ok"):
+              print(data)
+              sys.exit(1)
+
+          path = data["result"]["file_path"]
+          url = f"https://api.telegram.org/file/bot{token}/{path}"
+          urllib.request.urlretrieve(url, out)
+          print("Saved:", out)
+          PY
+
+      # ===== SELECT TARGET =====
+      - name: Prepare upload file
+        id: pick
+        run: |
+          if [ "${{ steps.vars.outputs.src }}" = "url" ] || \
+             [ "${{ steps.vars.outputs.src }}" = "telegram_file_id" ]; then
+            echo "target=${{ steps.vars.outputs.file }}" >> $GITHUB_OUTPUT
           else
-            FILE="$AUTO_NAME"
+            zip -r torrent_payload.zip out
+            echo "target=torrent_payload.zip" >> $GITHUB_OUTPUT
           fi
 
-          echo "src=$SRC" >> "$GITHUB_OUTPUT"
-          echo "inp=$INP" >> "$GITHUB_OUTPUT"
-          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+      # ===== PIXELDRAIN =====
+      - name: Upload to PixelDrain
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          FILE="${{ steps.pick.outputs.target }}"
 
-          echo "SOURCE: $SRC"
-          echo "INPUT : $INP"
-          echo "FILE  : $FILE"
+          RESP=$(curl -s \
+            -u :$PIXELDRAIN_API_KEY \
+            -T "$FILE" \
+            https://pixeldrain.com/api/file/)
 
-      # ====== DOWNLOAD: Direct URL ======
-      - name: Download direct URL (aria2)
-        if: steps.vars.outputs.
+          echo "$RESP" | jq .
+
+          ID=$(echo "$RESP" | jq -r '.id')
+          echo "## PixelDrain" >> $GITHUB_STEP_SUMMARY
+          echo "- File: $FILE" >> $GITHUB_STEP_SUMMARY
+          echo "- Link: https://pixeldrain.com/u/$ID" >> $GITHUB_STEP_SUMMARY
+
+      - name: Done
+        run: echo "Mirror selesai ✅"

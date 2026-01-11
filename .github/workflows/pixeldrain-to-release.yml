@@ -30,7 +30,7 @@ jobs:
           URL="${{ inputs.url }}"
           CUSTOM_NAME="${{ inputs.filename }}"
 
-          # Ambil nama file dari URL (tanpa querystring)
+          # ambil nama file dari URL (tanpa querystring)
           AUTO_NAME="$(basename "${URL%%\?*}")"
           if [ -z "$AUTO_NAME" ] || [ "$AUTO_NAME" = "/" ]; then
             AUTO_NAME="download.bin"
@@ -48,7 +48,7 @@ jobs:
           echo "URL: $URL"
           echo "FILE: $FILE"
 
-      # ====== DIAGNOSTIC (opsional tapi berguna) ======
+      # ====== DIAGNOSTIC (opsional) ======
       - name: Check URL headers (diagnostic)
         run: |
           URL="${{ steps.vars.outputs.url }}"
@@ -78,7 +78,7 @@ jobs:
 
           ls -lh "$FILE"
 
-      # ====== PIXELDRAIN UPLOAD + PRINT LINK ======
+      # ====== PIXELDRAIN UPLOAD + PRINT LINK (FIXED) ======
       - name: Upload to PixelDrain and print link
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
@@ -95,26 +95,35 @@ jobs:
             -u :$PIXELDRAIN_API_KEY \
             -T "$FILE" \
             https://pixeldrain.com/api/file/)"
-          echo "$RESPONSE" | jq .
 
-          # Extract id dan success
-          SUCCESS="$(echo "$RESPONSE" | jq -r '.success // empty')"
+          # Pretty print JSON (kalau gagal parse, print raw)
+          echo "$RESPONSE" | jq . || echo "$RESPONSE"
+
+          # Sukses kalau ada ID
           ID="$(echo "$RESPONSE" | jq -r '.id // empty')"
+          SHA256="$(echo "$RESPONSE" | jq -r '.hash_sha256 // empty')"
+          SIZE="$(echo "$RESPONSE" | jq -r '.size // empty')"
 
-          if [ "$SUCCESS" != "true" ] || [ -z "$ID" ]; then
-            echo "PixelDrain upload failed."
+          if [ -z "$ID" ]; then
+            echo "PixelDrain upload failed: missing id"
             exit 1
           fi
 
           LINK="https://pixeldrain.com/u/$ID"
           echo "PixelDrain link: $LINK"
 
-          # Simpan ke step summary biar gampang dicopy
+          # Simpan ke step summary
           {
             echo "## PixelDrain Upload Result"
             echo ""
             echo "- **File:** \`$FILE\`"
             echo "- **Link:** $LINK"
+            if [ -n "$SIZE" ]; then
+              echo "- **Size:** $SIZE bytes"
+            fi
+            if [ -n "$SHA256" ]; then
+              echo "- **SHA256:** \`$SHA256\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Done

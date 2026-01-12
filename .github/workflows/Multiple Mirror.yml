@@ -1,0 +1,85 @@
+name: Mirror multiple files -> PixelDrain
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Masukkan daftar URL (satu per baris)"
+        required: true
+        type: string
+        default: |
+          https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk
+          https://example.com/file2.zip
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 curl jq
+
+      - name: Process and Download
+        id: download
+        run: |
+          # Buat direktori untuk menampung download
+          mkdir -p downloads
+          
+          # Ambil input dan bersihkan baris kosong
+          echo "${{ github.event.inputs.urls }}" | sed '/^\s*$/d' > url_list.txt
+          
+          echo "## Mirror Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "| File Name | Status | PixelDrain Link |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS= read -r URL; do
+            echo "Processing: $URL"
+            
+            # Ambil nama file asli
+            FILE_NAME="$(basename "${URL%%\?*}")"
+            if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
+              FILE_NAME="file_$(date +%s%N).bin"
+            fi
+
+            echo "Downloading $FILE_NAME..."
+            
+            # Download file
+            aria2c \
+              --max-connection-per-server=4 \
+              --split=4 \
+              --retry-wait=5 \
+              --max-tries=5 \
+              --user-agent="Mozilla/5.0 (Linux; Android 10)" \
+              --header="Referer: https://www.biligame.com/" \
+              -d downloads -o "$FILE_NAME" "$URL"
+
+            if [ $? -eq 0 ]; then
+              echo "Uploading $FILE_NAME to PixelDrain..."
+              
+              # Upload ke PixelDrain
+              RESPONSE=$(curl -sS -u :${{ secrets.PIXELDRAIN_API_KEY }} -T "downloads/$FILE_NAME" https://pixeldrain.com/api/file/)
+              
+              ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+              
+              if [ -n "$ID" ]; then
+                LINK="https://pixeldrain.com/u/$ID"
+                echo "| $FILE_NAME | ✅ Success | [Download]($LINK) |" >> "$GITHUB_STEP_SUMMARY"
+                echo "Success: $LINK"
+              else
+                echo "| $FILE_NAME | ❌ Upload Failed | - |" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo "| $FILE_NAME | ❌ Download Failed | - |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            
+            # Hapus file setelah upload untuk menghemat storage runner
+            rm "downloads/$FILE_NAME"
+            
+          done < url_list.txt
+
+      - name: Done
+        run: echo "Semua file telah diproses."

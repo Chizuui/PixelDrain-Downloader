@@ -1,15 +1,13 @@
-name: Mirror multiple files -> PixelDrain
+name: Mirror (Pipe Separator) -> PixelDrain
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: "Masukkan daftar URL (satu per baris)"
+        description: "Masukkan URL dipisah dengan tanda '|' (contoh: url1 | url2 | url3)"
         required: true
         type: string
-        default: |
-          https://pkg.biligame.com/games/mrfz_2.6.91_20251219_100755_ab244.apk
-          https://example.com/file2.zip
+        default: "https://example.com/file1.zip | https://example.com/file2.apk"
 
 jobs:
   mirror:
@@ -23,23 +21,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 curl jq
 
-      - name: Process and Download
-        id: download
+      - name: Process, Download, and Upload
+        id: process
         run: |
-          # Buat direktori untuk menampung download
           mkdir -p downloads
           
-          # Ambil input dan bersihkan baris kosong
-          echo "${{ github.event.inputs.urls }}" | sed '/^\s*$/d' > url_list.txt
+          # ================= LOGIKA PEMISAH (PIPE SPLITTER) =================
+          # 1. echo input
+          # 2. tr '|' '\n': Ubah semua tanda pipa menjadi Enter (baris baru)
+          # 3. sed ...: Hapus spasi di depan/belakang URL (trim whitespace)
+          # 4. sed '/^$/d': Hapus baris kosong jika ada
           
+          echo "${{ github.event.inputs.urls }}" | tr '|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > url_list.txt
+          
+          # Cek isi list (untuk debug di log)
+          echo "Daftar URL yang akan diproses:"
+          cat url_list.txt
+          echo "--------------------------------"
+
+          # Siapkan Summary Table
           echo "## Mirror Report" >> "$GITHUB_STEP_SUMMARY"
           echo "| File Name | Status | PixelDrain Link |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
 
+          # Loop baca per baris
           while IFS= read -r URL; do
             echo "Processing: $URL"
             
-            # Ambil nama file asli
+            # Ambil nama file asli atau generate random jika tidak ada
             FILE_NAME="$(basename "${URL%%\?*}")"
             if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
               FILE_NAME="file_$(date +%s%N).bin"
@@ -47,7 +56,7 @@ jobs:
 
             echo "Downloading $FILE_NAME..."
             
-            # Download file
+            # Download dengan Aria2
             aria2c \
               --max-connection-per-server=4 \
               --split=4 \
@@ -68,7 +77,7 @@ jobs:
               if [ -n "$ID" ]; then
                 LINK="https://pixeldrain.com/u/$ID"
                 echo "| $FILE_NAME | ✅ Success | [Download]($LINK) |" >> "$GITHUB_STEP_SUMMARY"
-                echo "Success: $LINK"
+                echo "Success Link: $LINK"
               else
                 echo "| $FILE_NAME | ❌ Upload Failed | - |" >> "$GITHUB_STEP_SUMMARY"
               fi
@@ -76,10 +85,12 @@ jobs:
               echo "| $FILE_NAME | ❌ Download Failed | - |" >> "$GITHUB_STEP_SUMMARY"
             fi
             
-            # Hapus file setelah upload untuk menghemat storage runner
-            rm "downloads/$FILE_NAME"
+            # Hapus file lokal untuk menghemat storage runner
+            if [ -f "downloads/$FILE_NAME" ]; then
+                rm "downloads/$FILE_NAME"
+            fi
             
           done < url_list.txt
 
       - name: Done
-        run: echo "Semua file telah diproses."
+        run: echo "Semua proses selesai."

@@ -1,17 +1,23 @@
-name: Mirror (URL/Magnet/Torrent/Telegram) -> PixelDrain (No Zip)
+name: Mirror (URL/Magnet/Torrent/Telegram) -> PixelDrain
 
 on:
   workflow_dispatch:
     inputs:
       source:
-        description: "url | magnet | torrent_url | telegram"
+        description: "Source Type (url | magnet | torrent_url | telegram)"
         required: true
-        default: "telegram"
+        default: "magnet"
+        type: choice
+        options:
+        - magnet
+        - url
+        - torrent_url
+        - telegram
       input:
-        description: "Direct URL / magnet / URL .torrent / (Telegram: file_id atau link t.me)"
+        description: "Link / Magnet / File ID"
         required: true
       filename:
-        description: "Optional custom filename (Hanya efek untuk single file/URL/Telegram)"
+        description: "Custom filename (Only for direct URL/Telegram)"
         required: false
         default: ""
 
@@ -32,14 +38,11 @@ jobs:
           INP="${{ inputs.input }}"
           CUSTOM="${{ inputs.filename }}"
 
+          # Default output filename logic for single files
           AUTO="download.bin"
           if [ "$SRC" = "url" ]; then
             AUTO="$(basename "${INP%%\?*}")"
             [ -z "$AUTO" ] && AUTO="download.bin"
-          elif [ "$SRC" = "magnet" ]; then
-            AUTO="magnet_download"
-          elif [ "$SRC" = "torrent_url" ]; then
-            AUTO="torrent_download"
           elif [ "$SRC" = "telegram" ]; then
             AUTO="telegram_download.bin"
           fi
@@ -50,60 +53,45 @@ jobs:
           echo "inp=$INP" >> "$GITHUB_OUTPUT"
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
-      # ===== URL =====
+      # =========================================
+      # DOWNLOAD STEPS
+      # =========================================
+
+      # 1. Direct URL
       - name: Download direct URL
         if: steps.vars.outputs.src == 'url'
         shell: bash
         run: |
           URL="${{ steps.vars.outputs.inp }}"
           FILE="${{ steps.vars.outputs.file }}"
+          aria2c --max-connection-per-server=16 --split=16 --min-split-size=1M \
+            --user-agent="Mozilla/5.0" -o "$FILE" "$URL"
 
-          aria2c \
-            --max-connection-per-server=1 \
-            --split=1 -j 1 \
-            --retry-wait=5 --max-tries=10 \
-            --timeout=60 --connect-timeout=30 \
-            --user-agent="Mozilla/5.0" \
-            -o "$FILE" "$URL"
-
-          ls -lh "$FILE"
-
-      # ===== MAGNET =====
-      - name: Download magnet
+      # 2. Magnet Link
+      - name: Download Magnet
         if: steps.vars.outputs.src == 'magnet'
         shell: bash
         run: |
           MAGNET="${{ steps.vars.outputs.inp }}"
           mkdir -p out
-
-          aria2c \
-            --seed-time=0 \
-            --follow-torrent=mem \
-            --bt-stop-timeout=60 \
-            --enable-dht=true \
-            --enable-peer-exchange=true \
-            --bt-enable-lpd=true \
-            -d out \
-            "$MAGNET"
-
-          echo "Downloaded (out):"
+          # Optimized aria2c for torrents
+          aria2c --seed-time=0 --bt-stop-timeout=60 --enable-dht=true \
+            --follow-torrent=mem -d out "$MAGNET"
+          
+          echo "Download finished. Content of out:"
           ls -R out
 
-      # ===== TORRENT URL =====
-      - name: Download torrent file URL
+      # 3. Torrent File URL
+      - name: Download Torrent URL
         if: steps.vars.outputs.src == 'torrent_url'
         shell: bash
         run: |
           TORRENT_URL="${{ steps.vars.outputs.inp }}"
           mkdir -p out
-
           curl -L --fail -o file.torrent "$TORRENT_URL"
-          aria2c --seed-time=0 -d out file.torrent
+          aria2c --seed-time=0 --bt-stop-timeout=60 -d out file.torrent
 
-          echo "Downloaded (out):"
-          ls -R out
-
-      # ===== TELEGRAM =====
+      # 4. Telegram
       - name: Download from Telegram
         if: steps.vars.outputs.src == 'telegram'
         env:
@@ -113,86 +101,49 @@ jobs:
         shell: bash
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "Missing TELEGRAM_BOT_TOKEN"
+            echo "::error::Missing TELEGRAM_BOT_TOKEN"
             exit 1
           fi
-
           python3 << 'PY'
           import json, os, re, sys, urllib.request, urllib.parse
-
           token = os.environ["TELEGRAM_BOT_TOKEN"]
           inp = os.environ["TELEGRAM_INPUT"].strip()
           out = os.environ["OUTFILE"]
 
-          def api_get(url: str):
-            with urllib.request.urlopen(url) as r:
-              return json.loads(r.read().decode("utf-8"))
+          def api_get(url):
+              with urllib.request.urlopen(url) as r:
+                  return json.loads(r.read().decode("utf-8"))
 
-          def pick_file_id_from_update(obj: dict):
-            msg = obj.get("message") or obj.get("channel_post") or {}
-            if "document" in msg and "file_id" in msg["document"]:
-              return ("document", msg["document"]["file_id"])
-            if "video" in msg and "file_id" in msg["video"]:
-              return ("video", msg["video"]["file_id"])
-            if "audio" in msg and "file_id" in msg["audio"]:
-              return ("audio", msg["audio"]["file_id"])
-            if "photo" in msg and isinstance(msg["photo"], list) and msg["photo"]:
-              ph = msg["photo"][-1]
-              if "file_id" in ph:
-                return ("photo", ph["file_id"])
-            return (None, None)
-
-          is_tme = bool(re.match(r"^https?://t\.me/|^t\.me/", inp))
-          is_file_id_like = (not is_tme) and (len(inp) >= 20) and ("/" not in inp) and (" " not in inp)
-
+          # Logic to find file_id from message or input
           file_id = None
-          mode = None
-
-          if is_file_id_like:
-            file_id = inp
-            mode = "direct_file_id"
+          if len(inp) > 20 and "/" not in inp:
+              file_id = inp
           else:
-            mode = "latest_update_media"
-            updates = api_get(f"https://api.telegram.org/bot{token}/getUpdates")
-            if not updates.get("ok"):
-              print("getUpdates failed:", updates)
+              updates = api_get(f"https://api.telegram.org/bot{token}/getUpdates")
+              if not updates.get("ok"): sys.exit(1)
+              # Simple logic: take last message with document/video
+              for u in reversed(updates.get("result", [])):
+                  msg = u.get("message") or u.get("channel_post") or {}
+                  for k in ["document", "video", "audio"]:
+                      if k in msg:
+                          file_id = msg[k]["file_id"]
+                          break
+                  if file_id: break
+
+          if not file_id:
+              print("No file found.")
               sys.exit(1)
 
-            results = updates.get("result", [])
-            results_sorted = sorted(results, key=lambda x: x.get("update_id", 0), reverse=True)
-
-            picked_kind = None
-            picked_update_id = None
-
-            for u in results_sorted:
-              kind, fid = pick_file_id_from_update(u)
-              if fid:
-                file_id = fid
-                picked_kind = kind
-                picked_update_id = u.get("update_id")
-                break
-
-            if not file_id:
-              print("Tidak menemukan media terbaru di getUpdates.")
-              sys.exit(1)
-
-            print(f"Picked from getUpdates: kind={picked_kind}, update_id={picked_update_id}")
-
-          info = api_get(f"https://api.telegram.org/bot{token}/getFile?file_id={urllib.parse.quote(file_id)}")
-          if not info.get("ok"):
-            print("getFile failed:", info)
-            sys.exit(1)
-
+          info = api_get(f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}")
           path = info["result"]["file_path"]
-          dl = f"https://api.telegram.org/file/bot{token}/{path}"
-          
-          print("Downloading:", dl)
-          urllib.request.urlretrieve(dl, out)
+          dl_url = f"https://api.telegram.org/file/bot{token}/{path}"
+          print(f"Downloading: {dl_url}")
+          urllib.request.urlretrieve(dl_url, out)
           PY
 
-          ls -lh "$OUTFILE"
-
-      # ===== PIXELDRAIN UPLOAD (MULTI-FILE SUPPORT) =====
+      # =========================================
+      # UPLOAD STEPS (FIXED)
+      # =========================================
       - name: Upload to PixelDrain
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
@@ -206,55 +157,42 @@ jobs:
             exit 1
           fi
 
-          # Fungsi upload reusable
-          upload_one_file() {
-            local filepath="$1"
-            local filename="$(basename "$filepath")"
+          echo "## 📤 PixelDrain Upload Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| File Name | Size | Link |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| :--- | :--- | :--- |" >> "$GITHUB_STEP_SUMMARY"
+
+          # Function to upload a single file safely
+          upload_file() {
+            local fpath="$1"
+            local fname="$(basename "$fpath")"
             
-            echo "---------------------------------------------------"
-            echo "Uploading: $filename"
+            echo "🚀 Uploading: $fname"
             
-            # Curl upload
-            RESP="$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$filepath" -n https://pixeldrain.com/api/file/)"
+            # CRITICAL FIX: Added -g to curl to disable globbing (fixes brackets error)
+            RESP="$(curl -g -sS -u :$PIXELDRAIN_API_KEY -T "$fpath" -n https://pixeldrain.com/api/file/)"
             
-            # Parse JSON
             ID="$(echo "$RESP" | jq -r '.id // empty')"
-            SHA256="$(echo "$RESP" | jq -r '.hash_sha256 // empty')"
             SIZE="$(echo "$RESP" | jq -r '.size // empty')"
             
             if [ -n "$ID" ]; then
               LINK="https://pixeldrain.com/u/$ID"
-              echo "✅ Success: $LINK"
-              
-              # Tulis ke summary
-              echo "- **File:** \`$filename\`" >> "$GITHUB_STEP_SUMMARY"
-              echo "  - **Link:** [$LINK]($LINK)" >> "$GITHUB_STEP_SUMMARY"
-              echo "  - **Size:** $SIZE bytes" >> "$GITHUB_STEP_SUMMARY"
+              echo "✅ Uploaded: $LINK"
+              echo "| \`$fname\` | $SIZE | [Download]($LINK) |" >> "$GITHUB_STEP_SUMMARY"
             else
-              echo "❌ Failed: $RESP"
-              echo "- **File:** \`$filename\` (FAILED)" >> "$GITHUB_STEP_SUMMARY"
+              echo "❌ Error uploading $fname: $RESP"
             fi
           }
 
-          echo "## PixelDrain Upload Result" >> "$GITHUB_STEP_SUMMARY"
-
-          # LOGIKA PEMILIHAN (Single vs Folder Torrent)
-          if [ "$SRC" = "magnet" ] || [ "$SRC" = "torrent_url" ]; then
-             if [ ! -d out ]; then
-               echo "Directory 'out' not found. Download failed?"
-               exit 1
-             fi
-             
-             # Cari semua file dalam folder out (recursive) dan upload satu per satu
-             # Menggunakan process substitution untuk handle spasi pada nama file
-             while IFS= read -r -d '' file; do
-               upload_one_file "$file"
-             done < <(find out -type f -print0)
-             
+          # Logic: If 'out' folder exists (Torrent/Magnet), upload contents recursively
+          if [ -d "out" ]; then
+             # Find all files in 'out', handle spaces correctly
+             find out -type f -print0 | while IFS= read -r -d '' file; do
+               upload_file "$file"
+             done
+          # Else: Upload the single downloaded file (URL/Telegram)
+          elif [ -f "$SINGLE_FILE" ]; then
+             upload_file "$SINGLE_FILE"
           else
-             # Upload single file (URL Direct / Telegram)
-             upload_one_file "$SINGLE_FILE"
+             echo "::error::No file found to upload!"
+             exit 1
           fi
-
-      - name: Done
-        run: echo "All operations finished."

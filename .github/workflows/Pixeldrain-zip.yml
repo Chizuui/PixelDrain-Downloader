@@ -1,0 +1,104 @@
+name: GFL2 Mirror to PixelDrain (Batch Zip)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mirror-and-zip:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 zip curl jq
+
+      - name: Start Mirroring Process
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          # --- KONFIGURASI ---
+          INPUT_FILE="game.txt"
+          BATCH_SIZE=500  # Jumlah file per ZIP (500 file kecil sekitar 2-4 GB)
+          # -------------------
+
+          # Cek keberadaan file list
+          if [ ! -f "$INPUT_FILE" ]; then
+            echo "❌ Error: File '$INPUT_FILE' tidak ditemukan di repository!"
+            echo "Silakan upload file list link download Anda dengan nama game.txt"
+            exit 1
+          fi
+
+          echo "✅ Memulai proses untuk file: $INPUT_FILE"
+          
+          # Buat folder log
+          mkdir -p logs
+          
+          # Pecah file list besar menjadi bagian-bagian kecil (batch)
+          split -l "$BATCH_SIZE" -d --additional-suffix=.txt "$INPUT_FILE" batch_
+
+          echo "## 📦 Laporan Mirror GFL2" >> $GITHUB_STEP_SUMMARY
+          echo "| Bagian | Status | Link PixelDrain |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+
+          # Loop untuk memproses setiap file batch
+          for LIST in batch_*.txt; do
+            # Ambil nomor urut (misal '01' dari 'batch_01.txt')
+            PART_ID="${LIST#batch_}"
+            PART_ID="${PART_ID%.txt}"
+            
+            ZIP_NAME="GFL2_Data_Part_${PART_ID}.zip"
+            TEMP_DIR="temp_download_${PART_ID}"
+
+            echo "---------------------------------------------------"
+            echo "🔄 Memproses Bagian ${PART_ID}..."
+            echo "---------------------------------------------------"
+
+            # 1. DOWNLOAD
+            mkdir -p "$TEMP_DIR"
+            echo "⬇️ Sedang mendownload file-file..."
+            
+            # Download menggunakan Aria2
+            aria2c -i "$LIST" \
+              -d "$TEMP_DIR" \
+              -j 16 -x 16 -s 16 \
+              --user-agent="UnityPlayer/2020.3.36f1 (UnityWebRequest/1.0, libcurl/7.80.0-DEV)" \
+              --header="Referer: https://gf2-cn.cdn.sunborngame.com/" \
+              --console-log-level=warn \
+              --allow-overwrite=true \
+              --auto-file-renaming=false
+
+            # 2. ZIPPING
+            echo "📦 Sedang mengompres (Zipping) ke $ZIP_NAME..."
+            # -0: Store only (Tanpa kompresi berat agar CPU cepat)
+            zip -0 -r -q "$ZIP_NAME" "$TEMP_DIR"
+
+            # 3. UPLOAD KE PIXELDRAIN
+            echo "☁️ Sedang mengupload ke PixelDrain..."
+            RESPONSE=$(curl -sS -u :$PIXELDRAIN_API_KEY -T "$ZIP_NAME" https://pixeldrain.com/api/file/)
+            
+            # Ambil ID file dari respon JSON
+            FILE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+
+            if [ -n "$FILE_ID" ]; then
+              LINK="https://pixeldrain.com/u/$FILE_ID"
+              echo "✅ Sukses! Link: $LINK"
+              echo "| Part ${PART_ID} | ✅ Aman | [Download]($LINK) |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Gagal Upload!"
+              echo "| Part ${PART_ID} | ❌ Gagal | - |" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # 4. CLEANUP (SANGAT PENTING)
+            # Hapus file agar Github Action tidak kehabisan storage
+            echo "🧹 Membersihkan disk..."
+            rm -rf "$TEMP_DIR"
+            rm "$ZIP_NAME"
+            rm "$LIST"
+            
+          done
+
+          echo "🎉 Semua proses selesai!"
